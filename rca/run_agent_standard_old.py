@@ -42,8 +42,6 @@ def main(args, uid, dataset):
 
     if not os.path.exists(f"{unique_obs_path}/history"):
         os.makedirs(f"{unique_obs_path}/history")
-    if not os.path.exists(f"{unique_obs_path}/prediction"):
-        os.makedirs(f"{unique_obs_path}/prediction")
     if not os.path.exists(f"{unique_obs_path}/trajectory"):
         os.makedirs(f"{unique_obs_path}/trajectory")
     if not os.path.exists(f"{unique_obs_path}/prompt"):
@@ -67,8 +65,6 @@ def main(args, uid, dataset):
         "middle": 0,
         "hard": 0,
     }
-    temp_scores = scores.copy()
-    temp_nums = nums.copy()
 
     signal.signal(signal.SIGALRM, handler)
     logger.info(f"Using dataset: {dataset}")
@@ -77,45 +73,35 @@ def main(args, uid, dataset):
     for idx, row in instruct_data.iterrows():
 
         if idx < args.start_idx:
-            continue
-        if args.end_idx != -1 and idx > args.end_idx:
+                continue
+        if idx > args.end_idx:
             break
         
         instruction = row["instruction"]
         task_index = row["task_index"]
         scoring_points = row["scoring_points"]
-        # task_id = int(task_index.split('_')[1])
+        task_id = int(task_index.split('_')[1])
         best_score = 0
 
-        # if task_id <= 3:
-        #     catalog = "easy"
-        # elif task_id <= 6:
-        #     catalog = "middle"
-        # elif task_id <= 7:
-        #     catalog = "hard"
-        # else:
-        catalog = "total"
+        if task_id <= 3:
+            catalog = "easy"
+        elif task_id <= 6:
+            catalog = "middle"
+        elif task_id <= 7:
+            catalog = "hard"
+        else:
+            catalog = "total"
 
         for i in range(args.sample_num):
-            uuid = task_index
+            uuid = uid + f"_#{idx}-{i}"
             nb = nbf.new_notebook()
             nbfile = f"{unique_obs_path}/trajectory/{uuid}.ipynb"
             promptfile = f"{unique_obs_path}/prompt/{uuid}.json"
             logfile = f"{unique_obs_path}/history/{uuid}.log"
-            dst_trajectory_file = f"{unique_obs_path}/trajectory/{uuid}.json"
-            dst_prompt_file = f"{unique_obs_path}/prompt/{uuid}.json"
-            dst_prediction_file = f"{unique_obs_path}/prediction/{uuid}.txt"
-            # if os.path.exists(dst_trajectory_file):
-            #     continue
-            # if os.path.exists(dst_prompt_file):
-            #     continue
-            if os.path.exists(dst_prediction_file):
-                logger.info(f"Prediction file {dst_prediction_file} already exists, skipping...")
-                continue
             logger.remove()
             logger.add(sys.stdout, colorize=True, enqueue=True, level="INFO")
             logger.add(logfile, colorize=True, enqueue=True, level="INFO")
-            logger.debug('\n' + "#"*80 + f"\nuuid: {uuid}\n" + "#"*80)
+            logger.debug('\n' + "#"*80 + f"\n{uuid}: {task_index}\n" + "#"*80)
             try: 
                 signal.alarm(args.timeout)
 
@@ -123,23 +109,22 @@ def main(args, uid, dataset):
                 prediction, trajectory, prompt = agent.run(instruction, 
                                                        logger, 
                                                        max_step=args.controller_max_step, 
-                                                       max_turn=args.controller_max_turn,
-                                                       temperature=args.temperature, debug=False)
+                                                       max_turn=args.controller_max_turn)
                 
                 signal.alarm(0)
 
                 # 保存推理结果、轨迹、prompt（no_eval模式下只做保存，不做评测）
                 if args.no_eval:
                     # 保存轨迹
-                    with open(dst_trajectory_file, 'w', encoding='utf-8') as f:
+                    with open(f"{unique_obs_path}/trajectory/{uuid}.json", 'w', encoding='utf-8') as f:
                         json.dump(trajectory, f, ensure_ascii=False, indent=2)
                     # 保存完整对话历史
-                    with open(dst_prompt_file, 'w', encoding='utf-8') as f:
+                    with open(f"{unique_obs_path}/prompt/{uuid}.json", 'w', encoding='utf-8') as f:
                         json.dump({"messages": prompt}, f, ensure_ascii=False, indent=2)
                     # 保存预测结果
-                    with open(dst_prediction_file, 'w', encoding='utf-8') as f:
-                        f.write(prediction)
-                    logger.info(f"[no_eval] prediction, trajectory, prompt saved for {uuid}, at {unique_obs_path}/prediction/{uuid}.txt")
+                    with open(f"{unique_obs_path}/history/{uuid}.txt", 'w', encoding='utf-8') as f:
+                        f.write(f"预测结果:\n{prediction}\n")
+                    logger.info(f"[no_eval] prediction, trajectory, prompt saved for {uuid}")
                     continue
                 
                 for step in trajectory:
@@ -209,15 +194,13 @@ def main(args, uid, dataset):
 if __name__ == "__main__":
     
     uid = datetime.now().strftime('%Y-%m-%d_%H-%M-%S')
-    uid = "rca"
     parser = argparse.ArgumentParser()
     parser.add_argument("--dataset", type=str, default="phaseone")
     parser.add_argument("--sample_num", type=int, default=1)
     parser.add_argument("--start_idx", type=int, default=0)
-    parser.add_argument("--end_idx", type=int, default=-1)
-    parser.add_argument("--controller_max_step", type=int, default=35)
+    parser.add_argument("--end_idx", type=int, default=1)
+    parser.add_argument("--controller_max_step", type=int, default=25)
     parser.add_argument("--controller_max_turn", type=int, default=5)
-    parser.add_argument("--temperature", type=float, default=0.0)
     parser.add_argument("--timeout", type=int, default=600)
     parser.add_argument("--tag", type=str, default='rca')
     parser.add_argument("--auto", type=bool, default=False)

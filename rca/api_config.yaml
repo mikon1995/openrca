@@ -1,4 +1,4 @@
-SOURCE:   "OpenAI"
-MODEL:    "gpt-4o-2024-05-13"
-API_KEY:  "sk-xxxxxxxxxxxxxx"
-API_BASE: ""
+SOURCE:   "AI"
+MODEL:    "qwen3:235b"
+API_KEY:  "c1fb2f3686d52fa960f8a01f1d4d954f9b6227aab022737018c636521a8658e5"
+API_BASE: "https://uni-api.cstcloud.cn/v1"

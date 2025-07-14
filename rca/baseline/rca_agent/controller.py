@@ -1,6 +1,7 @@
 import json
 import re
 from IPython.terminal.embed import InteractiveShellEmbed
+import traceback
 
 from rca.baseline.rca_agent.executor import execute_act
 
@@ -31,33 +32,57 @@ format = """{
 }
 (DO NOT contain "```json" and "```" tags. DO contain the JSON object with the brackets "{}" only. Use '\\n' instead of an actual newline character to ensure JSON compatibility when you want to insert a line break within a string.)"""
 
+# summary = """Now, you have decided to finish your reasoning process. You should now provide the final answer to the issue. The candidates of possible root cause components and reasons are provided to you. The root cause components and reasons must be selected from the provided candidates.
+# 
+# {cand}
+# 
+# Recall the issue is: {objective}
+# 
+# Please first review your previous reasoning process to infer an exact answer of the issue. Then, summarize your final answer of the root causes using the following JSON format at the end of your response:
+# 
+# ```json
+# {{
+#     "1": {{
+#         "root cause occurrence datetime": (if asked by the issue, format: '%Y-%m-%d %H:%M:%S', otherwise ommited),
+#         "root cause component": (if asked by the issue, one selected from the possible root cause component list, otherwise ommited),
+#         "root cause reason": (if asked by the issue, one selected from the possible root cause reason list, otherwise ommited),
+#     }}, (mandatory)
+#     "2": {{ ... }}
+# }}
+# ```
+# (Please use "```json" and "```" tags to wrap the JSON object. You only need to provide the elements asked by the issue, and ommited the other fields in the JSON.)
+# """
+
 summary = """Now, you have decided to finish your reasoning process. You should now provide the final answer to the issue. The candidates of possible root cause components and reasons are provided to you. The root cause components and reasons must be selected from the provided candidates.
 
 {cand}
 
 Recall the issue is: {objective}
 
-Please first review your previous reasoning process to infer an exact answer of the issue. Then, summarize your final answer of the root causes using the following JSON format at the end of your response:
+Please first review your previous reasoning process to infer an exact answer of the issue. Then, summarize your final answer using the following JSON format:
 
 ```json
 {{
-    "1": {{
-        "root cause occurrence datetime": (if asked by the issue, format: '%Y-%m-%d %H:%M:%S', otherwise ommited),
-        "root cause component": (if asked by the issue, one selected from the possible root cause component list, otherwise ommited),
-        "root cause reason": (if asked by the issue, one selected from the possible root cause reason list, otherwise ommited),
-    }}, (mandatory)
-    "2": {{
-        "root cause occurrence datetime": (if asked by the issue, format: '%Y-%m-%d %H:%M:%S', otherwise ommited),
-        "root cause component": (if asked by the issue, one selected from the possible root cause component list, otherwise ommited),
-        "root cause reason": (if asked by the issue, one selected from the possible root cause reason list, otherwise ommited),
-    }}, (only if the failure number is "unknown" or "more than one" in the issue)
-    ... (only if the failure number is "unknown" or "more than one" in the issue)
+  "component": "(The root cause component. Must be strictly selected from the candidate list, and the name must match exactly. Do not add or modify any prefix, suffix, or variant. This field is used for component accuracy evaluation.)",
+  "reason": "(The root cause reason. Should cover as many root cause indicator names or log keywords as possible, and be concise (no more than 20 words). This field is used for reason accuracy evaluation. Avoid redundancy and ensure key evidence words are included.)",
+  "reasoning_trace": [
+    {{
+      "step": 1,
+      "action": "(The action taken in this step, e.g., 'QueryMetric(component)')",
+      "observation": "(The observation/result. The first 20 characters must contain key evidence points, such as indicator names, log keywords, or trace node names. Each step should be concise, meaningful, and directly support the reasoning process. This field is used for explainability and efficiency evaluation.)"
+    }}
+    // ... more steps
+  ]
 }}
 ```
 (Please use "```json" and "```" tags to wrap the JSON object. You only need to provide the elements asked by the issue, and ommited the other fields in the JSON.)
-Note that all the root cause components and reasons must be selected from the provided candidates. Do not reply 'unknown' or 'null' or 'not found' in the JSON. Do not be too conservative in selecting the root cause components and reasons. Be decisive to infer a possible answer based on your current observation."""
+- Do not output any extra fields. The output must be valid JSON and match the above format exactly.
+- The reasoning_trace should be as short and concise as possible, but must not omit any key reasoning steps. Each step must have actual reasoning value.
+- Follow the scoring criteria: component must match exactly, reason should cover key indicators/keywords, reasoning_trace observations must contain key evidence in the first 20 characters, and the chain should be short and meaningful.
+- If you cannot find a clear root cause, you MUST still provide the most likely issue based on your analysis, and output the reasoning process as required above.
+"""
 
-def control_loop(objective:str, plan:str, ap, bp, logger, max_step = 15, max_turn = 3) -> str:
+def control_loop(objective:str, plan:str, ap, bp, logger, max_step = 15, max_turn = 3, debug=False, temperature=0.0) -> str:
    
     prompt = [
             {'role': 'system', 'content': system.format(objective=objective,
@@ -82,9 +107,14 @@ def control_loop(objective:str, plan:str, ap, bp, logger, max_step = 15, max_tur
         note = [{'role': 'user', 'content': f"Continue your reasoning process for the target issue:\n\n{objective}\n\nFollow the rules during issue solving:\n\n{ap.rules}.\n\nResponse format:\n\n{format}"}]
         attempt_actor = []
         try:
+            if debug:
+                logger.info(f"[DEBUG] Step {step+1} - LLM请求prompt: {json.dumps(prompt + note, ensure_ascii=False, indent=2)}")
             response_raw = get_chat_completion(
                 messages=prompt + note,
+                temperature=temperature
             )
+            if debug:
+                logger.info(f"[DEBUG] Step {step+1} - LLM原始响应: {response_raw}")
             if "```json" in response_raw:
                 response_raw = re.search(r"```json\n(.*)\n```", response_raw, re.S).group(1).strip()
             logger.debug(f"Raw Response:\n{response_raw}")
@@ -94,11 +124,17 @@ def control_loop(objective:str, plan:str, ap, bp, logger, max_step = 15, max_tur
                 prompt.append({'role': 'user', 'content': "Please provide your analysis in requested JSON format."})
                 continue
             response = json.loads(response_raw)
-            analysis = response['analysis']
-            instruction = response['instruction']
-            completed = response['completed']
+            analysis = response.get('analysis', None)
+            instruction = response.get('instruction', None)
+            completed = response.get('completed', None)
+            if analysis is None or instruction is None or completed is None:
+                logger.warning(f"LLM response missing fields: analysis={analysis}, instruction={instruction}, completed={completed}")
+                prompt.append({'role': 'assistant', 'content': response_raw})
+                prompt.append({'role': 'user', 'content': "LLM response missing required fields. Please check your output format."})
+                continue
             logger.info('-'*80 + '\n' + f"### Step[{step+1}]\nAnalysis: {analysis}\nInstruction: {instruction}" + '\n' + '-'*80)
-
+            if debug:
+                logger.info(f"[DEBUG] Step {step+1} - 执行器输入: {instruction}")
             if completed == "True":
                 kernel.reset()
                 prompt.append({'role': 'assistant', 'content': response_raw})
@@ -106,7 +142,10 @@ def control_loop(objective:str, plan:str, ap, bp, logger, max_step = 15, max_tur
                                                                                 cand=bp.cand)})
                 answer = get_chat_completion(
                     messages=prompt,
+                    temperature=temperature
                 )
+                if debug:
+                    logger.info(f"[DEBUG] Step {step+1} - LLM最终答案原始响应: {answer}")
                 logger.debug(f"Raw Final Answer:\n{answer}")
                 prompt.append({'role': 'assistant', 'content': answer})
                 if "```json" in answer:
@@ -114,6 +153,9 @@ def control_loop(objective:str, plan:str, ap, bp, logger, max_step = 15, max_tur
                 return answer, trajectory, prompt
 
             code, result, status, new_history = execute_act(instruction, bp.schema, history, attempt_actor, kernel, logger)
+            if debug:
+                logger.info(f"[DEBUG] Step {step+1} - 执行器代码: {code}")
+                logger.info(f"[DEBUG] Step {step+1} - 执行器结果: {result}")
             if not status:
                 logger.warn(f'Self-Correction failed.')
                 observation = "The Executor failed to execute the instruction. Please provide a new instruction."
@@ -125,7 +167,8 @@ def control_loop(objective:str, plan:str, ap, bp, logger, max_step = 15, max_tur
             prompt.append({'role': 'user', 'content': observation})
 
         except Exception as e:
-            logger.error(e)
+            logger.error("Exception as control_loop: " + traceback.format_exc())
+            logger.error(f"response_raw: {response_raw}")
             prompt.append({'role': 'assistant', 'content': response_raw})
             prompt.append({'role': 'user', 'content': f"{str(e)}\nPlease provide your analysis in requested JSON format."})
             if 'context_length_exceeded' in str(e):
@@ -143,7 +186,10 @@ def control_loop(objective:str, plan:str, ap, bp, logger, max_step = 15, max_tur
         prompt.append({'role': 'user', 'content': final_prompt['content']})
     answer = get_chat_completion(
         messages=prompt,
+        temperature=temperature
     )
+    if debug:
+        logger.info(f"[DEBUG] Max steps reached - LLM最终答案原始响应: {answer}")
     logger.debug(f"Raw Final Answer:\n{answer}")
     prompt.append({'role': 'assistant', 'content': answer})
     if "```json" in answer:

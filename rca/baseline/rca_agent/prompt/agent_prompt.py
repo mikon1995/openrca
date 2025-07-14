@@ -39,4 +39,23 @@ What you SHOULD NOT do:
 6. **DO NOT calculate threshold AFTER filtering data within the given time duration.** Always calculate global thresholds using the entire KPI series of a specific component within a metric file BEFORE filtering data within the given time duration.
 7. **DO NOT query a specific KPI without knowing which KPIs are available.** Different systems may have completely different KPI naming conventions. If you want to query a specific KPI, first ensure that you are aware of all the available KPIs.
 8. **DO NOT mistakenly identify a healthy (non-faulty) service at the downstream end of a trace that includes faulty components as the root cause.** The root cause component should be the most downstream **faulty** service to appear within the trace call chain, which must first and foremost be a FAULTY component identified by metrics analysis.
-9. **DO NOT focus solely on warning or error logs during log analysis. Many info logs contain critical information about service operations and interactions between services, which can be valuable for root cause analysis.**"""
+9. **DO NOT focus solely on warning or error logs during log analysis. Many info logs contain critical information about service operations and interactions between services, which can be valuable for root cause analysis.**
+10. **DO NOT use 'component' as a column name or key in your code. 'component' is not an actual column in the data files. You MUST search for the correct column name (such as 'object_id', 'object_type', 'pod', 'kubernetes_node', etc.) according to the specific file type and context.**
+"""
+rules = rules + """
+What you SHOULD TAKE CARE:
+1. Before reading a file, if you are not certain about all possible columns, you MUST first retrieve all available columns (e.g., by reading the file header or using pandas DataFrame .columns) before writing any code that depends on specific columns.
+2. When parsing or converting time columns in pandas, you SHOULD use the following robust function to safely handle both tz-naive and tz-aware timestamps:
+    def to_shanghai(dt):
+        dt = pd.to_datetime(dt)
+        if getattr(dt, 'tz', None) is None:
+            # If tz-naive, localize first
+            return dt.tz_localize('UTC').tz_convert('Asia/Shanghai')
+        else:
+            # If tz-aware, just convert
+            return dt.tz_convert('Asia/Shanghai')
+    Example usage:
+        start_utc8 = to_shanghai(start_time_utc)
+        end_utc8 = to_shanghai(end_time_utc)
+"""
+

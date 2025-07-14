@@ -79,7 +79,7 @@ def execute_act(instruction:str, background:str, history, attempt, kernel, logge
                 code = re.search(code_pattern, response).group(1).strip()
             else:
                 code = response.strip()
-            logger.debug(f"Raw Code:\n{code}")
+            logger.info(f"Raw Code:\n{code}")
             if "import matplotlib" in code or "import seaborn" in code:
                 logger.warning("The generated visualization code detected.")
                 prompt.append({'role': 'assistant', 'content': code})
@@ -100,8 +100,8 @@ def execute_act(instruction:str, background:str, history, attempt, kernel, logge
                     rows = int(match.group(1))
                     if rows > 10:
                         result += f"\n\n**Note**: The printed pandas DataFrame is truncated due to its size. Only **10 rows** are displayed, which may introduce observation bias due to the incomplete table. If you want to comprehensively understand the details without bias, please ask Executor using `df.head(X)` to display more rows."
-                logger.debug(f"Execution Result:\n{result}")
-                logger.debug(f"Execution finished. Time cost: {t2-t1}")
+                logger.info(f"Execution Result:\n{result}")
+                logger.info(f"Execution finished. Time cost: {t2-t1}")
                 history.extend([
                     {'role': 'assistant', 'content': code},
                     {'role': 'user', 'content': summary.format(result=result)},
@@ -126,7 +126,7 @@ def execute_act(instruction:str, background:str, history, attempt, kernel, logge
                 retry_flag = True
             
         except Exception as e:
-            logger.error(e)
+            logger.error("Exception as execute_act: " + traceback.format_exc())
             time.sleep(1)
     
     t2 = datetime.now()

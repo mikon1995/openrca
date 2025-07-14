@@ -58,11 +58,14 @@ def AI_chat_completion(messages, temperature):
         api_key=configs["API_KEY"],
         base_url=configs["API_BASE"]
     )
-    return client.chat.completions.create(
+    content = client.chat.completions.create(
         model = configs["MODEL"],
         messages = messages,
         temperature = temperature,
     ).choices[0].message.content
+    if '</think>' in content:
+        content = content.split('</think>')[1].strip()
+    return content
 
 def get_chat_completion(messages, temperature=0.0):
 
