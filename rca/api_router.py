@@ -1,6 +1,8 @@
 import os
 import yaml
 import time
+import base64
+
 
 def load_config(config_path="rca/api_config.yaml"):
     configs = dict(os.environ)

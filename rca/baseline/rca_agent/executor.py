@@ -64,7 +64,7 @@ def execute_act(instruction:str, background:str, history, attempt, kernel, logge
     prompt = history.copy()
     note = [{'role': 'user', 'content': f"Continue your code writing process following the rules:\n\n{rule}\n\nResponse format:\n\n{format}"}]
     tokenizer = tiktoken.encoding_for_model("gpt-4")
-    for i in range(2):
+    for i in range(5):
         try:
             if not retry_flag:
                 response = get_chat_completion(
@@ -79,7 +79,7 @@ def execute_act(instruction:str, background:str, history, attempt, kernel, logge
                 code = re.search(code_pattern, response).group(1).strip()
             else:
                 code = response.strip()
-            logger.info(f"Raw Code:\n{code}")
+            # logger.info(f"Raw Code:\n{code}")
             if "import matplotlib" in code or "import seaborn" in code:
                 logger.warning("The generated visualization code detected.")
                 prompt.append({'role': 'assistant', 'content': code})

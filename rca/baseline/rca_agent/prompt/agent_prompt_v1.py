@@ -8,7 +8,12 @@ What you SHOULD do:
         - Then, calculate global thresholds (e.g., global P95, where 'global' means the threshold of all 'component-KPI' time series within a whole metric file) for each 'component-KPI' time series. - Finally, filter data within the given time duration for all time series to perform further analysis.
         - Since the root cause component must be selected from the provided possible root cause components, all other level's components (e.g., service mesh components, middleware components, etc.) should be ignored.
     1.2. Anomaly detection: 
-        - An anomaly is typically a data point that exceeds the global threshold.
+        - **Select the anomaly detection strategy based on the data type:**
+            - For time series metrics, use statistical thresholds (e.g., P95, P5), trend change, sudden spikes/drops, or distribution shift.
+            - For logs, use keyword matching, frequency analysis, and correlation with metric/trace anomalies.
+            - For traces, use latency, error rate, and abnormal span patterns.
+        - **If the anomaly type is unknown or new, try multiple detection methods (statistical, rule-based, time-series, distributional, etc.) and provide the most reasonable explanation.**
+        - For multi-source data, cross-validate anomalies across metrics, logs, and traces to improve confidence.
         - Look for anomalies below a certain threshold (e.g., <=P95, <=P15, or <=P5) in traffic KPIs or business KPIs (e.g., success rate (ss)) since some network failures can cause a sudden drop on them due to packet loss.
         - Loose the global threshold (e.g., from >=P95 to >=P90, or from <=P95 to <=P15, <=P5) if you really cannot find any anomalies.
     1.3. Fault identification: 

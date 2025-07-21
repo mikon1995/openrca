@@ -12,14 +12,27 @@ from loguru import logger
 from nbformat import v4 as nbf
 import pandas as pd
 import signal
+from parallel import parallel_run_filelist
+from tqdm import tqdm
+from rca.baseline.rca_agent.rca_agent import RCA_Agent
+from concurrent.futures import ProcessPoolExecutor, as_completed
 
 def handler(signum, frame):
     raise TimeoutError("Loop execution exceeded the time limit")
 
-def main(args, uid, dataset):
+def reach_max_retry(history):
+    for item in history:
+        if "Max try reached. Please check the history" in item:
+            return True
+    return False
 
-    from rca.baseline.rca_agent.rca_agent import RCA_Agent
-    import rca.baseline.rca_agent.prompt.agent_prompt as ap
+def run_one_problem(args_tuple):
+    uuid, instruction, unique_obs_path, args = args_tuple
+    if args.ap_version == 'v1':
+        import rca.baseline.rca_agent.prompt.agent_prompt_v1 as ap
+    else:
+        import rca.baseline.rca_agent.prompt.agent_prompt as ap
+    dataset = args.dataset
     if dataset == "Telecom":
         import rca.baseline.rca_agent.prompt.basic_prompt_Telecom as bp
     elif dataset == "Bank":
@@ -27,209 +40,101 @@ def main(args, uid, dataset):
     elif dataset == "Market/cloudbed-1" or dataset == "Market/cloudbed-2":
         import rca.baseline.rca_agent.prompt.basic_prompt_Market as bp
     elif dataset == "phaseone":
-        import rca.baseline.rca_agent.prompt.basic_prompt_phaseone as bp
+        if args.bp_version == 'v1':
+            import rca.baseline.rca_agent.prompt.basic_prompt_phaseone_v1 as bp
+        else:
+            import rca.baseline.rca_agent.prompt.basic_prompt_phaseone as bp
+    logfile = f"{unique_obs_path}/history/{uuid}.log"
+    dst_trajectory_file = f"{unique_obs_path}/trajectory/{uuid}.json"
+    dst_prompt_file = f"{unique_obs_path}/prompt/{uuid}.json"
+    dst_prediction_file = f"{unique_obs_path}/prediction/{uuid}.txt"
+    logger.remove()
+    logger.add(sys.stdout, colorize=True, enqueue=True, level="INFO")
+    logger.add(logfile, colorize=True, enqueue=True, level="INFO")
+    logger.debug('\n' + "#"*80 + f"\nuuid: {uuid}\n" + "#"*80)
+    try:
+        agent = RCA_Agent(ap, bp)
+        prediction, trajectory, prompt = agent.run(instruction, 
+                                                logger, 
+                                                max_step=args.controller_max_step, 
+                                                max_turn=args.controller_max_turn,
+                                                temperature=args.temperature, debug=False, uuid=uuid)
+        # 保存轨迹
+        with open(dst_trajectory_file, 'w', encoding='utf-8') as f:
+            json.dump(trajectory, f, ensure_ascii=False, indent=2)
+        # 保存完整对话历史
+        with open(dst_prompt_file, 'w', encoding='utf-8') as f:
+            json.dump({"messages": prompt}, f, ensure_ascii=False, indent=2)
+        # 保存预测结果
+        with open(dst_prediction_file, 'w', encoding='utf-8') as f:
+            f.write(prediction)
+        logger.info(f"[no_eval] prediction, trajectory, prompt saved for {uuid}, at {unique_obs_path}/prediction/{uuid}.txt")
+        return uuid
+    except Exception as e:
+        logger.error(f"Exception in uuid {uuid}: {e}")
+        return None
 
+def main(args, uid):
+    dataset = args.dataset
     inst_file = f"dataset/{dataset}/query.csv"
-    gt_file = f"dataset/{dataset}/record.csv"
     eval_file = f"test/result/{dataset}/agent-{args.tag}-{configs['MODEL'].split('/')[-1]}.csv"
     obs_path = f"test/monitor/{dataset}/agent-{args.tag}-{configs['MODEL'].split('/')[-1]}"
     unique_obs_path = f"{obs_path}/{uid}"
-
-    instruct_data = pd.read_csv(inst_file)
-    gt_data = pd.read_csv(gt_file)
-    if not os.path.exists(inst_file) or not os.path.exists(gt_file):
-        raise FileNotFoundError(f"Please download the dataset first.")
-
-    if not os.path.exists(f"{unique_obs_path}/history"):
-        os.makedirs(f"{unique_obs_path}/history")
-    if not os.path.exists(f"{unique_obs_path}/prediction"):
-        os.makedirs(f"{unique_obs_path}/prediction")
-    if not os.path.exists(f"{unique_obs_path}/trajectory"):
-        os.makedirs(f"{unique_obs_path}/trajectory")
-    if not os.path.exists(f"{unique_obs_path}/prompt"):
-        os.makedirs(f"{unique_obs_path}/prompt")
+    if args.ap_version:
+        unique_obs_path += f"-ap-{args.ap_version}"
+    if args.bp_version:
+        unique_obs_path += f"-bp-{args.bp_version}"
+    for d in ["history", "prediction", "trajectory", "prompt"]:
+        os.makedirs(f"{unique_obs_path}/{d}", exist_ok=True)
     if not os.path.exists(eval_file):
-        if not os.path.exists(f"test/result/{dataset}"):
-            os.makedirs(f"test/result/{dataset}")
-        eval_df = pd.DataFrame(columns=["instruction", "prediction", "groundtruth", "passed", "failed", "score"])
-    else:
-        eval_df = pd.read_csv(eval_file)
-
-    scores = {
-        "total": 0,
-        "easy": 0,
-        "middle": 0,
-        "hard": 0,
-    }
-    nums = {
-        "total": 0,
-        "easy": 0,
-        "middle": 0,
-        "hard": 0,
-    }
-    temp_scores = scores.copy()
-    temp_nums = nums.copy()
-
-    signal.signal(signal.SIGALRM, handler)
+        os.makedirs(f"test/result/{dataset}", exist_ok=True)
     logger.info(f"Using dataset: {dataset}")
     logger.info(f"Using model: {configs['MODEL'].split('/')[-1]}")
-    
-    for idx, row in instruct_data.iterrows():
-
-        if idx < args.start_idx:
+    instruct_data_ls = []
+    for idx, line in enumerate(open(inst_file)):
+        if idx == 0:
             continue
-        if args.end_idx != -1 and idx > args.end_idx:
-            break
-        
-        instruction = row["instruction"]
-        task_index = row["task_index"]
-        scoring_points = row["scoring_points"]
-        # task_id = int(task_index.split('_')[1])
-        best_score = 0
-
-        # if task_id <= 3:
-        #     catalog = "easy"
-        # elif task_id <= 6:
-        #     catalog = "middle"
-        # elif task_id <= 7:
-        #     catalog = "hard"
-        # else:
-        catalog = "total"
-
-        for i in range(args.sample_num):
-            uuid = task_index
-            nb = nbf.new_notebook()
-            nbfile = f"{unique_obs_path}/trajectory/{uuid}.ipynb"
-            promptfile = f"{unique_obs_path}/prompt/{uuid}.json"
-            logfile = f"{unique_obs_path}/history/{uuid}.log"
-            dst_trajectory_file = f"{unique_obs_path}/trajectory/{uuid}.json"
-            dst_prompt_file = f"{unique_obs_path}/prompt/{uuid}.json"
-            dst_prediction_file = f"{unique_obs_path}/prediction/{uuid}.txt"
-            # if os.path.exists(dst_trajectory_file):
-            #     continue
-            # if os.path.exists(dst_prompt_file):
-            #     continue
-            if os.path.exists(dst_prediction_file):
-                logger.info(f"Prediction file {dst_prediction_file} already exists, skipping...")
-                continue
-            logger.remove()
-            logger.add(sys.stdout, colorize=True, enqueue=True, level="INFO")
-            logger.add(logfile, colorize=True, enqueue=True, level="INFO")
-            logger.debug('\n' + "#"*80 + f"\nuuid: {uuid}\n" + "#"*80)
-            try: 
-                signal.alarm(args.timeout)
-
-                agent = RCA_Agent(ap, bp)
-                prediction, trajectory, prompt = agent.run(instruction, 
-                                                       logger, 
-                                                       max_step=args.controller_max_step, 
-                                                       max_turn=args.controller_max_turn,
-                                                       temperature=args.temperature, debug=False)
-                
-                signal.alarm(0)
-
-                # 保存推理结果、轨迹、prompt（no_eval模式下只做保存，不做评测）
-                if args.no_eval:
-                    # 保存轨迹
-                    with open(dst_trajectory_file, 'w', encoding='utf-8') as f:
-                        json.dump(trajectory, f, ensure_ascii=False, indent=2)
-                    # 保存完整对话历史
-                    with open(dst_prompt_file, 'w', encoding='utf-8') as f:
-                        json.dump({"messages": prompt}, f, ensure_ascii=False, indent=2)
-                    # 保存预测结果
-                    with open(dst_prediction_file, 'w', encoding='utf-8') as f:
-                        f.write(prediction)
-                    logger.info(f"[no_eval] prediction, trajectory, prompt saved for {uuid}, at {unique_obs_path}/prediction/{uuid}.txt")
+        uuid, instruction = line.strip().split(",")[:2]
+        dst_prediction_file = f"{unique_obs_path}/prediction/{uuid}.txt"
+        dst_history_file = f"{unique_obs_path}/history/{uuid}.log"
+        if os.path.exists(dst_prediction_file):
+            if os.path.exists(dst_history_file):
+                history = list(open(dst_history_file))
+                if not reach_max_retry(history):
+                    # logger.info(f"Prediction file {dst_prediction_file} already exists, skipping...")
                     continue
-                
-                for step in trajectory:
-                    code_cell = nbf.new_code_cell(step['code'])
-                    result_cell = nbf.new_markdown_cell(f"```\n{step['result']}\n```")
-                    nb.cells.append(code_cell)
-                    nb.cells.append(result_cell)
-                with open(nbfile, 'w', encoding='utf-8') as f:
-                    json.dump(nb, f, ensure_ascii=False, indent=4)
-                logger.info(f"Trajectory has been saved to {nbfile}")
-
-                with open(promptfile, 'w', encoding='utf-8') as f:
-                    json.dump({"messages": prompt}, f, ensure_ascii=False, indent=4)
-                logger.info(f"Prompt has been saved to {promptfile}")
-
-                new_eval_df = pd.DataFrame([{"row_id": idx,
-                                            "task_index": task_index,
-                                            "instruction": instruction, 
-                                            "prediction": prediction,
-                                            "groundtruth": '\n'.join([f'{col}: {gt_data.iloc[idx][col]}' for col in gt_data.columns if col != 'description']),
-                                            "passed": "N/A",
-                                            "failed": "N/A", 
-                                            "score": "N/A"}])
-                eval_df = pd.concat([eval_df, new_eval_df], 
-                                    ignore_index=True)
-                eval_df.to_csv(eval_file, 
-                               index=False)
-
-                if not args.no_eval:
-                    passed_criteria, failed_criteria, score = evaluate(prediction, scoring_points)
-                    
-                    logger.info(f"Prediction: {prediction}")
-                    logger.info(f"Scoring Points: {scoring_points}")
-                    logger.info(f"Passed Criteria: {passed_criteria}")
-                    logger.info(f"Failed Criteria: {failed_criteria}")
-                    logger.info(f"Score: {score}")
-                    best_score = max(best_score, score)
-
-                    eval_df.loc[eval_df.index[-1], "passed"] = '\n'.join(passed_criteria)
-                    eval_df.loc[eval_df.index[-1], "failed"] = '\n'.join(failed_criteria)
-                    eval_df.loc[eval_df.index[-1], "score"] = score
-                    eval_df.to_csv(eval_file, 
-                                   index=False)
-                
-                    temp_scores = scores.copy()
-                    temp_scores[catalog] += best_score
-                    temp_scores["total"] += best_score
-                    temp_nums = nums.copy()
-                    temp_nums[catalog] += 1
-                    temp_nums["total"] += 1
                 else:
-                    temp_scores = scores.copy()
-                    temp_scores[catalog] += best_score
-                    temp_scores["total"] += best_score
-                    temp_nums = nums.copy()
-                    temp_nums[catalog] += 1
-                    temp_nums["total"] += 1
-
-            except TimeoutError:
-                logger.error(f"Loop {i} exceeded the time limit and was skipped")
-                continue
-      
-        scores = temp_scores
-        nums = temp_nums
-
+                    os.remove(dst_history_file)
+                    os.remove(dst_prediction_file)
+                    logger.info(f"Prediction file {dst_prediction_file} already exists, but max retry reached, rerun...") 
+            else:
+                os.remove(dst_prediction_file)     
+        instruct_data_ls.append((uuid, instruction, unique_obs_path, args))
+    print('instruct_data_ls', len(instruct_data_ls))
+    # exit()
+    max_workers = min(args.n_procs, os.cpu_count())
+    with ProcessPoolExecutor(max_workers=max_workers) as executor:
+        futures = [executor.submit(run_one_problem, arg) for arg in instruct_data_ls]
+        for fut in as_completed(futures):
+            try:
+                result = fut.result()
+                if result is not None:
+                    logger.info(f"Task {result} finished.")
+            except Exception as e:
+                logger.error(f"Task failed: {e}")
 
 if __name__ == "__main__":
-    
     uid = datetime.now().strftime('%Y-%m-%d_%H-%M-%S')
     uid = "rca"
     parser = argparse.ArgumentParser()
     parser.add_argument("--dataset", type=str, default="phaseone")
-    parser.add_argument("--sample_num", type=int, default=1)
-    parser.add_argument("--start_idx", type=int, default=0)
-    parser.add_argument("--end_idx", type=int, default=-1)
-    parser.add_argument("--controller_max_step", type=int, default=35)
+    parser.add_argument("--controller_max_step", type=int, default=25)
     parser.add_argument("--controller_max_turn", type=int, default=5)
     parser.add_argument("--temperature", type=float, default=0.0)
     parser.add_argument("--timeout", type=int, default=600)
     parser.add_argument("--tag", type=str, default='rca')
-    parser.add_argument("--auto", type=bool, default=False)
-    parser.add_argument("--no_eval", action="store_true", help="If set, do not perform evaluation/scoring, only save prediction and intermediate results.")
-
+    parser.add_argument("--n_procs", type=int, default=12)
+    parser.add_argument("--ap_version", type=str, default='v1')
+    parser.add_argument("--bp_version", type=str, default='v1')
     args = parser.parse_args()
-
-    if args.auto:
-        print(f"Auto mode is on. Model is fixed to {configs['MODEL']}")
-        datasets = ["Market/cloudbed-1", "Market/cloudbed-2", "Bank", "Telecom"]
-        for dataset in datasets:
-            main(args, uid, dataset)
-    else:
-        dataset = args.dataset
-        main(args, uid, dataset)
+    main(args, uid)

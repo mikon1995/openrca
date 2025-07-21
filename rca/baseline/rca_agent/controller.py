@@ -2,10 +2,16 @@ import json
 import re
 from IPython.terminal.embed import InteractiveShellEmbed
 import traceback
-
+import base64
 from rca.baseline.rca_agent.executor import execute_act
 
-from rca.api_router import get_chat_completion
+from rca.api_router import get_chat_completion, configs
+
+
+def encode_image(image_path):
+    with open(image_path, "rb") as image_file:
+        return base64.b64encode(image_file.read()).decode('utf-8')
+    
 
 system = """You are the Administrator of a DevOps Assistant system for failure diagnosis. To solve each given issue, you should iteratively instruct an Executor to write and execute Python code for data analysis on telemetry files of target system. By analyzing the execution results, you should approximate the answer step-by-step.
 
@@ -80,18 +86,41 @@ Please first review your previous reasoning process to infer an exact answer of 
 - The reasoning_trace should be as short and concise as possible, but must not omit any key reasoning steps. Each step must have actual reasoning value.
 - Follow the scoring criteria: component must match exactly, reason should cover key indicators/keywords, reasoning_trace observations must contain key evidence in the first 20 characters, and the chain should be short and meaningful.
 - If you cannot find a clear root cause, you MUST still provide the most likely issue based on your analysis, and output the reasoning process as required above.
+- **If there are multiple possible root causes, you MUST only return the single most likely one.**
 """
 
-def control_loop(objective:str, plan:str, ap, bp, logger, max_step = 15, max_turn = 3, debug=False, temperature=0.0) -> str:
-   
-    prompt = [
-            {'role': 'system', 'content': system.format(objective=objective,
-                                                        format=format,
-                                                        agent=ap.rules, 
-                                                        background=bp.schema)},
-            {'role': 'user', 'content': "Let's begin."}
-        ]
+def control_loop(objective:str, plan:str, ap, schema, cand, logger, max_step = 15, max_turn = 3, debug=False, temperature=0.0) -> str:
+    if 'VL' in configs['MODEL']:
+        base64_image = encode_image('./arch.jpg')
+        prompt = [
+                {'role': 'system', 'content':[
+                        {
+                            'type': 'text',
+                            'text': system.format(
+                                objective=objective,
+                                format=format,
+                                agent=ap.rules,
+                                background=schema
+                            )
+                        },
+                        {
+                            'type': 'image_url',
+                            'image_url': {
+                                'url': f"data:image/jpeg;base64,{base64_image}"
+                            }
+                        }
+                    ]},
+                {'role': 'user', 'content': "Let's begin."}
+            ]
+    else:
 
+        prompt = [
+                {'role': 'system', 'content': system.format(objective=objective,
+                                                            format=format,
+                                                            agent=ap.rules, 
+                                                            background=schema)},
+                {'role': 'user', 'content': "Let's begin."}
+            ]
     history = []
     trajectory = []
     observation = "Let's begin."
@@ -139,7 +168,7 @@ def control_loop(objective:str, plan:str, ap, bp, logger, max_step = 15, max_tur
                 kernel.reset()
                 prompt.append({'role': 'assistant', 'content': response_raw})
                 prompt.append({'role': 'user', 'content': summary.format(objective=objective,
-                                                                                cand=bp.cand)})
+                                                                                cand=cand)})
                 answer = get_chat_completion(
                     messages=prompt,
                     temperature=temperature
@@ -152,7 +181,7 @@ def control_loop(objective:str, plan:str, ap, bp, logger, max_step = 15, max_tur
                     answer = re.search(r"```json\n(.*)\n```", answer, re.S).group(1).strip()
                 return answer, trajectory, prompt
 
-            code, result, status, new_history = execute_act(instruction, bp.schema, history, attempt_actor, kernel, logger)
+            code, result, status, new_history = execute_act(instruction, schema, history, attempt_actor, kernel, logger)
             if debug:
                 logger.info(f"[DEBUG] Step {step+1} - 执行器代码: {code}")
                 logger.info(f"[DEBUG] Step {step+1} - 执行器结果: {result}")
@@ -179,7 +208,7 @@ def control_loop(objective:str, plan:str, ap, bp, logger, max_step = 15, max_tur
     logger.warning("Max steps reached. Please check the history.")
     kernel.reset()
     final_prompt = {'role': 'user', 'content': summary.format(objective=objective,
-                                                                    cand=bp.cand).replace('Now, you have decided to finish your reasoning process. ', 'Now, the maximum steps of your reasoning have been reached. ')}
+                                                                    cand=cand).replace('Now, you have decided to finish your reasoning process. ', 'Now, the maximum steps of your reasoning have been reached. ')}
     if prompt[-1]['role'] == 'user':
         prompt[-1]['content'] = final_prompt['content']
     else:
